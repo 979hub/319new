@@ -1,7 +1,8 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from binance.client import Client
 import os
 import uvicorn
+import math
 
 app = FastAPI()
 
@@ -10,47 +11,61 @@ API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 WEBHOOK_PASSPHRASE = os.getenv("WEBHOOK_PASSPHRASE", "ss9")
 
-# 初始化币安客户端
-client = Client(API_KEY, API_SECRET)
+# 初始化合约客户端 (testnet=True 表示测试网)
+# 如果以后切到实盘，只需把 testnet=True 改为 False 即可
+client = Client(API_KEY, API_SECRET, testnet=True)
+
+def get_tick_precision(symbol):
+    """获取合约币种的数量精度 (stepSize)"""
+    info = client.futures_exchange_info()
+    for s in info['symbols']:
+        if s['symbol'] == symbol.upper():
+            for f in s['filters']:
+                if f['filterType'] == 'LOT_SIZE':
+                    step_size = float(f['stepSize'])
+                    return int(round(-math.log(step_size, 10), 0))
+    return 3 # 默认保留3位
 
 @app.get("/")
 def home():
-    return {"status": "online"}
+    return {"status": "Binance Futures Robot Running"}
 
 @app.post("/webhook")
-async def webhook(request: Request):
-    # 1. 直接获取原始 JSON，不进行严格格式校验，防止多字段报错
+async def futures_webhook(request: Request):
     data = await request.json()
     
-    # 2. 提取核心 4 个字段
-    passphrase = data.get("passphrase")
-    symbol = data.get("symbol")
-    side = data.get("side") # buy 或 sell
-    amount = data.get("amount") # 开仓金额 (USDT)
+    # 验证密码
+    if data.get("passphrase") != WEBHOOK_PASSPHRASE:
+        return {"status": "error", "msg": "password error"}
 
-    # 3. 验证密码
-    if passphrase != WEBHOOK_PASSPHRASE:
-        return {"status": "error", "msg": "wrong password"}
+    # 提取字段
+    symbol = data.get("symbol").upper()
+    side = data.get("side").upper()      # BUY 或 SELL
+    amount_usdt = float(data.get("amount", 0)) # 你想开多少 USDT 的仓位
 
-    print(f"收到指令: {symbol} | 方向: {side} | 金额: {amount} USDT")
+    print(f"收到合约信号: {symbol} | 方向: {side} | 金额: {amount_usdt} USDT")
 
-    # 4. 强制执行【市价成交】 (Market Order)
     try:
-        side_type = Client.SIDE_BUY if side.lower() == "buy" else Client.SIDE_SELL
+        # 1. 获取当前市价
+        price = float(client.futures_symbol_ticker(symbol=symbol)['price'])
         
-        # 使用 quoteOrderQty，直接花指定的 USDT 金额买入/卖出，不传价格
-        order = client.create_order(
-            symbol=symbol.upper(),
-            side=side_type,
-            type=Client.ORDER_TYPE_MARKET,
-            quoteOrderQty=amount
+        # 2. 计算下单数量并处理精度 (合约不支持直接传USDT金额，必须传币数)
+        precision = get_tick_precision(symbol)
+        quantity = round(amount_usdt / price, precision)
+
+        # 3. 执行【合约市价下单】
+        order = client.futures_create_order(
+            symbol=symbol,
+            side=side,
+            type='MARKET',
+            quantity=quantity
         )
         
-        print(f"市价成交成功: ID {order['orderId']}")
-        return {"status": "success", "id": order['orderId']}
+        print(f"合约成交成功: ID {order['orderId']} | 实际成交数量: {quantity}")
+        return {"status": "success", "order": order}
 
     except Exception as e:
-        print(f"下单失败: {str(e)}")
+        print(f"合约下单失败: {str(e)}")
         return {"status": "error", "msg": str(e)}
 
 if __name__ == "__main__":
