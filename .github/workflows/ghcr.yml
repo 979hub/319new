@@ -1,0 +1,33 @@
+name: Build and Push to GHCR
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write  # 允许写入 GitHub 软件包
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 登录 GitHub 自带的容器仓库 (无需账号密码，自动授权)
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 构建并推送
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          # 镜像名称会是: ghcr.io/你的用户名/项目名:latest (全小写)
+          tags: ghcr.io/${{ github.repository }}:latest
