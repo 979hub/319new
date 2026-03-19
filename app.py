@@ -1,47 +1,54 @@
-from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from binance.client import Client
 import os
-import uvicorn
-# 导入你自己的交易逻辑类
-# from binance_handler import MyBinanceBot 
 
 app = FastAPI()
 
-# 安全配置：在 TradingView 警报中设置一个 Passphrase，防止他人恶意调用
-WEBHOOK_PASSPHRASE = os.getenv("WEBHOOK_PASSPHRASE", "my_secret_password")
+# --- 配置区 (从环境变量读取，安全第一) ---
+# 在 claw.cloud 的环境变量里设置这些值
+API_KEY = os.getenv("BINANCE_API_KEY")
+API_SECRET = os.getenv("BINANCE_API_SECRET")
+WEBHOOK_PASSPHRASE = os.getenv("WEBHOOK_PASSPHRASE", "ss9")
 
-class TradingViewSignal(BaseModel):
+# 初始化币安客户端
+client = Client(API_KEY, API_SECRET)
+
+# 定义信号结构 (严格按照你要求的: 密码, 币种, 金额, 方向)
+class Signal(BaseModel):
     passphrase: str
-    symbol: str        # 例如: BTCUSDT
-    side: str          # buy 或 sell
-    price: float       # 当前价格
-    action: str        # open, close 等
-    # 你可以根据需要增加字段
+    symbol: str    # 例如: BTCUSDT
+    amount: float  # 开仓金额 (USDT)
+    side: str      # buy 或 sell
 
 @app.get("/")
-def read_root():
+def health_check():
     return {"status": "running"}
 
 @app.post("/webhook")
-async def webhook(signal: TradingViewSignal):
+async def binance_webhook(signal: Signal):
     # 1. 验证密码
     if signal.passphrase != WEBHOOK_PASSPHRASE:
-        raise HTTPException(status_code=401, detail="Invalid passphrase")
+        raise HTTPException(status_code=401, detail="Invalid password")
 
-    print(f"收到信号: {signal.symbol} - {signal.side} - {signal.action}")
+    print(f"收到信号: {signal.symbol} | 方向: {signal.side} | 金额: {signal.amount} USDT")
 
-    # 2. 调用你的币安交易逻辑
+    # 2. 执行市价单逻辑
     try:
-        # 示例：
-        # bot = MyBinanceBot(api_key=..., api_secret=...)
-        # if signal.side == "buy":
-        #     bot.open_position(signal.symbol, ...)
+        side_type = Client.SIDE_BUY if signal.side.lower() == "buy" else Client.SIDE_SELL
         
-        # 这里替换成你已有的机器人入口
-        return {"status": "success", "message": "Signal processed"}
-    except Exception as e:
-        print(f"交易执行失败: {e}")
-        return {"status": "error", "message": str(e)}
+        # 下市价单 (Market Order)
+        # quoteOrderQty 代表你想花多少 USDT 买入/卖出
+        order = client.create_order(
+            symbol=signal.symbol.upper(),
+            side=side_type,
+            type=Client.ORDER_TYPE_MARKET,
+            quoteOrderQty=signal.amount
+        )
+        
+        print(f"下单成功: {order['orderId']}")
+        return {"status": "success", "order_id": order['orderId']}
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=80)
+    except Exception as e:
+        print(f"下单失败: {str(e)}")
+        return {"status": "error", "message": str(e)}
